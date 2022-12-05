@@ -2,16 +2,21 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.RedisData;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -29,10 +34,12 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+    //定义一个线程池
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
     /*
      *
      * @param null
-     * @return 根据id查询缓存并放入数据库中去，同时解决缓存穿透、击穿问题（互斥锁）
+     * @return 使用逻辑过期解决缓存击穿问题
      * @author czj
      * @date 2022/11/25 11:27
      */
@@ -41,43 +48,39 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //1.从redis中查询是否有当前产品缓存
         String key = CACHE_SHOP_KEY + id;
         String s = redisTemplate.opsForValue().get(key);
-        //2.这一步同时检查了缓存是否命中与是否为空值两个操作
-        if (StrUtil.isNotBlank(s)){
-            Shop shop = JSONUtil.toBean(s, Shop.class);//将Json转成Java对象返回
+        //2.判断缓存是否命中，理论来说必定命中
+        if (StrUtil.isBlank(s)){
+            return null;//未命中则直接返回Null
+        }
+        //3.先把Json数据反序列化对象
+        RedisData data = JSONUtil.toBean(s, RedisData.class);
+        Shop shop = JSONUtil.toBean((JSONObject) data.getData(), Shop.class);
+        LocalDateTime expireTime = data.getExpireTime();
+        //4.判断是否过期
+        if(expireTime.isAfter(LocalDateTime.now())){
+            //4.1没过期,返回数据
             return Result.ok(shop);
         }
-        //判断是不是""，如果是则证明这是可能导致缓存穿透的值
-        if(s != null){
-            return Result.fail("没有该店铺！");
+        //4.2过期，需要进行缓存重建
+        //5.缓存重建
+        //5.1获取互斥锁
+        String keys = LOCK_SHOP_KEY + id;
+        boolean isLock = tryLock(keys);
+        //5.2成功，开启独立线程进行缓存重建
+        if(isLock){
+            CACHE_REBUILD_EXECUTOR.submit(() ->{
+                try {
+                    this.saveShopToRedis(id,20l);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    unLock(keys);
+                }
+            });
+
         }
-        //如果不是则证明只是单纯地redis中没有该数据，去数据库查然后重建缓存就行，首先解决缓存击穿问题
-        String keyForLock = "lock:shop:" + id;//为某个店铺的锁设置一个key
-        Shop shopById = null;//从数据库中查询数据
-        try {
-            //3.获取互斥锁
-            boolean isLock = tryLock(keyForLock);
-            //3.1失败，证明已经有线程帮我们进行缓存重建，这里进行休眠后再重新访问
-            if(!isLock){
-                Thread.sleep(10);//休息一会，等待前面的线程缓存重建完毕时再重新访问
-                return QueryById(id);
-            }
-            //3.2成功，进行缓存重建
-            shopById = getById(id);
-            Thread.sleep(200);//模拟重建延迟
-            if (shopById == null){
-                //数据库中不存在则加入值为""的缓存并设置超时时间，防止redis内存不足（缓存穿透）
-                redisTemplate.opsForValue().set(key,"",CACHE_NULL_TTL, TimeUnit.MINUTES);
-                return Result.fail("店铺不存在");
-            }
-            //5.数据库中存在则写入redis
-            redisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(shopById),CACHE_SHOP_TTL, TimeUnit.MINUTES);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        } finally {
-            //释放互斥锁
-            unLock(keyForLock);
-        }
-        return Result.ok(shopById);
+        //5.3失败，返回旧数据
+        return Result.ok(shop);
     }
 
     /**
@@ -124,5 +127,25 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     private void unLock(String key){
         redisTemplate.delete(key);
+    }
+/**
+ * 进行缓存预热，将热点key提前放入Redis中去
+ * @param id
+ * @return void
+ * @author czj
+ * @date 2022/12/5 14:52
+ */
+
+    public void saveShopToRedis(long id,long expireTime) throws InterruptedException {
+        //1.从数据库中查询店铺数据
+        Shop byId = getById(id);
+        Thread.sleep(10);//模拟缓存重建延时
+        //2.封装数据
+        RedisData data = new RedisData();
+        data.setData(byId);
+        data.setExpireTime(LocalDateTime.now().plusSeconds(expireTime));
+        //3.写入Redis中
+        redisTemplate.opsForValue().set(CACHE_SHOP_KEY + id,JSONUtil.toJsonStr(data));
+
     }
 }
