@@ -17,6 +17,13 @@ import java.util.UUID;
 @RequestMapping("upload")
 public class UploadController {
 
+    /**
+     * 上传探店图片，在用户选择好图片时，前端将会发送此请求
+     * @param image
+     * @return com.hmdp.dto.Result
+     * @author czj
+     * @date 2022/12/8 16:26
+     */
     @PostMapping("blog")
     public Result uploadImage(@RequestParam("file") MultipartFile image) {
         try {
@@ -24,7 +31,7 @@ public class UploadController {
             String originalFilename = image.getOriginalFilename();
             // 生成新文件名
             String fileName = createNewFileName(originalFilename);
-            // 保存文件
+            // 保存文件到服务器，这里保存到了本地
             image.transferTo(new File(SystemConstants.IMAGE_UPLOAD_DIR, fileName));
             // 返回结果
             log.debug("文件上传成功，{}", fileName);
