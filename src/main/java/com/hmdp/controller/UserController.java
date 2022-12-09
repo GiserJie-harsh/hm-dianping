@@ -35,6 +35,26 @@ public class UserController {
     @Resource
     private IUserInfoService userInfoService;
     /**
+     * 用户连续签到天数
+     * @return com.hmdp.dto.Result
+     * @author czj
+     * @date 2022/12/9 19:35
+     */
+    @GetMapping("/sign/count")
+    public Result signCount(){
+        return userService.signCount();
+    }
+    /**
+     * 用户签到
+     * @return com.hmdp.dto.Result
+     * @author czj
+     * @date 2022/12/9 19:34
+     */
+    @PostMapping("/sign")
+    public Result userSign(){
+        return userService.userSign();
+    }
+    /**
      * 根据id查询用户
      * @param id
      * @return com.hmdp.dto.Result
